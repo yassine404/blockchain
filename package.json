@@ -16,5 +16,10 @@
   "bugs": {
     "url": "https://github.com/yassine404/blockchain/issues"
   },
-  "homepage": "https://github.com/yassine404/blockchain#readme"
+  "homepage": "https://github.com/yassine404/blockchain#readme",
+  "dependencies": {
+    "crypto-js": "^4.2.0",
+    "express": "^5.2.1",
+    "web3": "^4.16.0"
+  }
 }

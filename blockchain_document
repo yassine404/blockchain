@@ -1,0 +1,23 @@
+how to impliments a block chain :
+-defining use case
+-desining the network architecture
+-shosing a consensus ( pow,pos)
+-selecting a developpement platform
+
+
+
+steps to create a basic blockchain network using Node.js:
+
+1-create a new node.js project and install the libraries :crypto-js , express and web3.js.
+
+2-Define a structure of a blockchain .each block have a unique index , a timestamp and data that you want to store in the block.
+
+3-create a  blockchain  class that  can add a new blocks to the chain and validate the integrity of the chain.
+
+4-create an endpoint using express.js that can be used to add new data to the blockchain.
+
+5-create an other endpoint that can be used to retrieve the current state of the blockchain.
+
+6-add fonctionality to the  blockchain for maintaining the integrity of the chain , such as detecting and resolving conflicts between different versions of the chain .
+
+7-use the web3.js library to interact with Ethereum blockchain by connecting to an Ethereum node and deploying smart contracts .
