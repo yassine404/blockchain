@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blockchain UTXO - Interface</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>⛓️ Blockchain UTXO (P2PKH)</h1>
+        
+        <div class="status-bar">
+            <span id="node-status">🟢 Nœud actif (port <span id="p2p-port"></span>)</span>
+            <span id="chain-length">📦 Blocs: <span id="block-count">0</span></span>
+            <span id="pending-count">⏳ En attente: <span id="tx-pending">0</span></span>
+        </div>
+
+        <div class="wallet-section card">
+            <h2>👛 Wallet</h2>
+            <div id="wallet-not-selected" class="wallet-placeholder">
+                <p>Aucun wallet sélectionné</p>
+                <button id="create-wallet-btn">Créer un nouveau wallet</button>
+                <select id="wallet-select"></select>
+                <button id="select-wallet-btn">Sélectionner</button>
+            </div>
+            <div id="wallet-info" style="display:none;">
+                <p><strong>Nom:</strong> <span id="current-wallet-name"></span></p>
+                <p><strong>Adresse:</strong> <span id="current-wallet-address"></span></p>
+                <p><strong>Solde:</strong> <span id="current-wallet-balance">0</span> coins</p>
+                <button id="refresh-balance">🔄 Actualiser</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>💸 Envoyer des coins</h2>
+            <input type="text" id="send-to-address" placeholder="Adresse destinataire">
+            <input type="number" id="send-amount" placeholder="Montant" step="0.01" min="0">
+            <button id="send-btn">Envoyer</button>
+            <div id="send-result"></div>
+        </div>
+
+        <div class="card">
+            <h2>⛏️ Minage</h2>
+            <button id="mine-btn">Miner un nouveau bloc</button>
+            <p>Récompense: 50 coins (vers votre wallet courant)</p>
+        </div>
+
+        <div class="card">
+            <h2>🌐 Réseau P2P</h2>
+            <input type="text" id="peer-address" placeholder="ws://localhost:8889 ou 8889">
+            <button id="connect-peer-btn">Connecter</button>
+        </div>
+
+        <div class="card">
+            <h2>📋 Blockchain</h2>
+            <button id="refresh-chain">Rafraîchir</button>
+            <div id="chain-view" class="scrollable"></div>
+        </div>
+
+        <div class="card">
+            <h2>🪙 Mes UTXOs</h2>
+            <button id="refresh-utxos">Rafraîchir</button>
+            <div id="utxo-view" class="scrollable"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

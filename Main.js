@@ -1,124 +1,38 @@
 #!/usr/bin/env node
 
 const readline = require("readline");
-const fs       = require("fs");
-const EC       = require("elliptic").ec;
-const ec       = new EC("secp256k1");
+const Blockchain = require("./blockchain");
+const Transaction = require("./transaction");
+const P2P = require("./p2p");
+const Wallet = require("./wallet");
+const { saveChain, loadChain, saveWallets, loadWallets } = require("./storage");
 
-const Blockchain    = require("./blockchain");
-const Transaction   = require("./transaction");
-const P2P           = require("./p2p");
-
-// ─── Persistence files ────────────────────────────────────────────────────────
-const CHAIN_FILE   = "./chain.json";
-const WALLETS_FILE = "./wallets.json";
-
-// ─── Load / Save helpers ──────────────────────────────────────────────────────
-
-function saveChain(blockchain) {
-    fs.writeFileSync(CHAIN_FILE, JSON.stringify(blockchain.chain, null, 2));
-}
-
-function loadChain(blockchain) {
-    if (!fs.existsSync(CHAIN_FILE)) return;
-    try {
-        const raw   = JSON.parse(fs.readFileSync(CHAIN_FILE));
-        const Block = require("./block");
-
-        blockchain.chain = raw.map(b => {
-            const block = Object.assign(new Block(0, 0, [], ""), b);
-            if (Array.isArray(block.transactions)) {
-                block.transactions = block.transactions.map(t =>
-                    Object.assign(new Transaction(null, null, 0), t)
-                );
-            }
-            return block;
-        });
-    } catch (e) {
-        console.error("Erreur chargement chain:", e.message);
-    }
-}
-
-function saveWallets(wallets) {
-    const data = {};
-    for (const [name, key] of Object.entries(wallets)) {
-        data[name] = key.getPrivate("hex");
-    }
-    fs.writeFileSync(WALLETS_FILE, JSON.stringify(data, null, 2));
-}
-
-function loadWallets() {
-    const wallets = {};
-    if (!fs.existsSync(WALLETS_FILE)) return wallets;
-    try {
-        const data = JSON.parse(fs.readFileSync(WALLETS_FILE));
-        for (const [name, privHex] of Object.entries(data)) {
-            wallets[name] = ec.keyFromPrivate(privHex, "hex");
-        }
-    } catch (e) {
-        console.error("Erreur chargement wallets:", e.message);
-    }
-    return wallets;
-}
-
-// ─── Bootstrap ────────────────────────────────────────────────────────────────
-
+// ─── Initialisation Blockchain ────────────────────────────────────────────────
 const myBlockchain = new Blockchain();
 loadChain(myBlockchain);
-console.log(`Blockchain chargee (${myBlockchain.chain.length} blocs).`);
+console.log(`Blockchain chargée (${myBlockchain.chain.length} blocs).`);
 
+// ─── Chargement des wallets ───────────────────────────────────────────────────
 const wallets = loadWallets();
-console.log(`${Object.keys(wallets).length} wallets charges.`);
+console.log(`${Object.keys(wallets).length} wallets chargés.`);
 
+// ─── P2P ──────────────────────────────────────────────────────────────────────
 const p2p = new P2P(myBlockchain);
 myBlockchain.p2p = p2p;
-
-// Quand le P2P adopte une chaîne plus longue → sauvegarder automatiquement
 p2p.onChainUpdate = () => {
     saveChain(myBlockchain);
-    console.log("Chaine mise a jour et sauvegardee.");
+    console.log("Chaîne mise à jour et sauvegardée.");
 };
 
-// ─── P2P : démarrage avec fallback de port ────────────────────────────────────
-// Utilise la variable d'environnement P2P_PORT ou 8888 par défaut
-// Lancement : P2P_PORT=8889 node Main.js
 const BASE_PORT = parseInt(process.env.P2P_PORT) || 8888;
+p2p.listen(BASE_PORT);   // la méthode listen gère le fallback de port
 
-function tryListen(port) {
-    const { WebSocketServer } = require("ws");
-    const server = new WebSocketServer({ port });
+// ─── État courant ─────────────────────────────────────────────────────────────
+let currentWallet = null;   // instance de Wallet
 
-    server.on("error", err => {
-        if (err.code === "EADDRINUSE") {
-            console.warn(`Port ${port} occupe, essai sur ${port + 1}...`);
-            server.close();
-            tryListen(port + 1);
-        } else {
-            console.error("Erreur P2P serveur:", err.message);
-        }
-    });
-
-    server.on("listening", () => {
-        console.log(`Serveur P2P sur port ${port}`);
-        p2p.port = port;
-        server.on("connection", socket => {
-            console.log(`Nouveau pair connecte sur port ${port}`);
-            p2p.initConnection(socket);
-            // Le nouveau pair nous demande notre chaîne au moment de la connexion
-            // (géré automatiquement dans p2p.connectToPeer côté client)
-        });
-    });
-}
-
-tryListen(BASE_PORT);
-
-// ─── Current wallet state ─────────────────────────────────────────────────────
-let currentWalletName = null;
-let currentKeyPair    = null;
-
-// ─── Readline interface ───────────────────────────────────────────────────────
+// ─── Interface readline ───────────────────────────────────────────────────────
 const rl = readline.createInterface({
-    input:  process.stdin,
+    input: process.stdin,
     output: process.stdout,
 });
 
@@ -127,80 +41,142 @@ function ask(question) {
 }
 
 // ─── Menu ─────────────────────────────────────────────────────────────────────
-
 function printMenu() {
-    console.log("\n=== MENU BLOCKCHAIN ===");
-    console.log("1. Creer un wallet");
+    console.log("\n=== MENU BLOCKCHAIN (UTXO) ===");
+    console.log("1. Créer un wallet");
     console.log("2. Choisir wallet courant");
     console.log("3. Afficher solde");
-    console.log("4. Envoyer des coins (transaction)");
+    console.log("4. Envoyer des coins (transaction UTXO)");
     console.log("5. Miner le bloc suivant");
     console.log("6. Afficher la blockchain");
-    console.log("7. Se connecter a un pair (P2P)");
-    console.log("8. Quitter");
+    console.log("7. Afficher les UTXOs du wallet courant");
+    console.log("8. Se connecter à un pair (P2P)");
+    console.log("9. Quitter");
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 async function handleCreateWallet() {
     const name = (await ask("Nom du wallet : ")).trim();
-    if (!name)         { console.log("Nom invalide.");                  return; }
-    if (wallets[name]) { console.log(`Wallet '${name}' existe deja.`); return; }
+    if (!name) {
+        console.log("Nom invalide.");
+        return;
+    }
+    if (wallets[name]) {
+        console.log(`Wallet '${name}' existe déjà.`);
+        return;
+    }
 
-    const keyPair = ec.genKeyPair();
-    wallets[name] = keyPair;
+    const wallet = new Wallet();
+    wallets[name] = wallet;
     saveWallets(wallets);
 
-    console.log(`Wallet '${name}' cree.`);
-    console.log(`  Cle publique  : ${keyPair.getPublic("hex")}`);
-    console.log(`  Cle privee    : ${keyPair.getPrivate("hex")}  (garder secrete !)`);
+    console.log(`Wallet '${name}' créé.`);
+    console.log(`  Adresse (P2PKH) : ${wallet.getAddress()}`);
+    console.log(`  Clé privée       : ${wallet.getPrivateKey()}  (gardez-la secrète !)`);
 }
 
 async function handleChooseWallet() {
     const name = (await ask("Nom du wallet : ")).trim();
-    if (!wallets[name]) { console.log(`Wallet '${name}' introuvable.`); return; }
-
-    currentWalletName = name;
-    currentKeyPair    = wallets[name];
-    console.log(`Wallet '${name}' selectionne.`);
+    if (!wallets[name]) {
+        console.log(`Wallet '${name}' introuvable.`);
+        return;
+    }
+    currentWallet = wallets[name];
+    console.log(`Wallet '${name}' sélectionné.`);
+    console.log(`  Adresse : ${currentWallet.getAddress()}`);
 }
 
 function handleShowBalance() {
-    if (!currentKeyPair) { console.log("Aucun wallet selectionne."); return; }
-    const address = currentKeyPair.getPublic("hex");
+    if (!currentWallet) {
+        console.log("Aucun wallet sélectionné.");
+        return;
+    }
+    const address = currentWallet.getAddress();
     const balance = myBlockchain.getBalanceOfAddress(address);
-    console.log(`Solde de ${currentWalletName} : ${balance.toFixed(2)}`);
+    console.log(`Solde de ${currentWallet.getAddress().substring(0, 15)}... : ${balance.toFixed(2)}`);
 }
 
 async function handleSendCoins() {
-    if (!currentKeyPair) { console.log("Aucun wallet selectionne."); return; }
+    if (!currentWallet) {
+        console.log("Aucun wallet sélectionné.");
+        return;
+    }
 
-    const toAddress = (await ask("Adresse destinataire (cle publique hex) : ")).trim();
+    const toAddress = (await ask("Adresse destinataire : ")).trim();
     const amountStr = (await ask("Montant : ")).trim();
-    const amount    = parseFloat(amountStr);
+    const amount = parseFloat(amountStr);
+    if (isNaN(amount) || amount <= 0) {
+        console.log("Montant invalide.");
+        return;
+    }
 
-    if (isNaN(amount) || amount <= 0) { console.log("Montant invalide."); return; }
+    const myAddress = currentWallet.getAddress();
+    const utxos = myBlockchain.getUTXOsForAddress(myAddress);
+    if (utxos.length === 0) {
+        console.log("Aucun UTXO disponible.");
+        return;
+    }
 
+    // Sélection simple : on prend les UTXOs dans l'ordre jusqu'à avoir assez
+    let selected = [];
+    let total = 0;
+    for (const utxo of utxos) {
+        selected.push(utxo);
+        total += utxo.amount;
+        if (total >= amount) break;
+    }
+
+    if (total < amount) {
+        console.log(`Solde insuffisant. Disponible : ${total}`);
+        return;
+    }
+
+    const tx = new Transaction();
+    // Ajouter les inputs
+    selected.forEach(utxo => {
+        tx.addInput(utxo.txid, utxo.outputIndex, currentWallet.publicKey);
+    });
+
+    // Output destinataire
+    tx.addOutput(toAddress, amount);
+
+    // Change (si reste)
+    const change = total - amount;
+    if (change > 0) {
+        tx.addOutput(myAddress, change);
+    }
+
+    // Signer chaque input
     try {
-        const tx = new Transaction(currentKeyPair.getPublic("hex"), toAddress, amount);
-        tx.signTransaction(currentKeyPair);
-        myBlockchain.createTransaction(tx);
-        console.log("Transaction ajoutee en attente.");
+        selected.forEach((_, idx) => {
+            currentWallet.signTransaction(tx, idx);
+        });
+
+        // Valider et ajouter au pool
+        if (tx.isValid(myBlockchain.utxoSet)) {
+            myBlockchain.pendingTransactions.push(tx);
+            console.log("Transaction créée et ajoutée au pool en attente.");
+        } else {
+            console.log("Transaction invalide (échec validation).");
+        }
     } catch (e) {
-        console.error("Erreur transaction:", e.message);
+        console.error("Erreur lors de la signature :", e.message);
     }
 }
 
 function handleMineBlock() {
-    if (!currentKeyPair) { console.log("Aucun wallet selectionne."); return; }
+    if (!currentWallet) {
+        console.log("Aucun wallet sélectionné (utilisé pour recevoir la récompense).");
+        return;
+    }
 
-    
     try {
-        myBlockchain.minePendingTransaction(currentKeyPair.getPublic("hex"));
+        myBlockchain.minePendingTransaction(currentWallet.getAddress());
         saveChain(myBlockchain);
-        console.log("Bloc mine et sauvegarde.");
+        console.log("Bloc miné et sauvegardé.");
     } catch (e) {
-        console.error("Bloc invalide, non ajoute.", e.message);
+        console.error("Erreur lors du minage :", e.message);
     }
 }
 
@@ -208,55 +184,60 @@ function handleShowChain() {
     console.log("\n=== BLOCKCHAIN ===");
     for (const block of myBlockchain.chain) {
         console.log(`\nBloc #${block.index}`);
-        console.log(`  Timestamp     : ${new Date(block.timetamp).toISOString()}`);
-        console.log(`  PreviousHash  : ${block.previousHash}`);
-        console.log(`  Hash          : ${block.hash}`);
-        console.log(`  Nonce         : ${block.nonce}`);
+        console.log(`  Timestamp    : ${new Date(block.timetamp).toISOString()}`);
+        console.log(`  PreviousHash : ${block.previousHash}`);
+        console.log(`  Hash         : ${block.hash}`);
+        console.log(`  Nonce        : ${block.nonce}`);
 
         if (Array.isArray(block.transactions)) {
-            console.log(`  Transactions  : ${block.transactions.length}`);
+            console.log(`  Transactions : ${block.transactions.length}`);
             for (const tx of block.transactions) {
-                const from = tx.fromAddress ? tx.fromAddress.substring(0, 20) + "..." : "COINBASE";
-                const to   = tx.toAddress   ? tx.toAddress.substring(0, 20)   + "..." : "?";
-                console.log(`    ${from} -> ${to}  |  ${tx.amount} coins`);
+                // Affichage simplifié UTXO
+                const inputSummary = tx.inputs.map(i => i.txid.substring(0, 8) + "..." + i.outputIndex).join(", ");
+                const outputSummary = tx.outputs.map(o => `${o.amount}→${o.address.substring(0, 10)}...`).join(", ");
+                console.log(`    Inputs: [${inputSummary}]  Outputs: [${outputSummary}]`);
             }
         } else {
             console.log(`  Data : ${block.transactions}`);
         }
     }
 
-    try {
-        console.log(`\nChaine valide : ${myBlockchain.isChainValid()}`);
-    } catch (e) {
-        console.error("Erreur validation chaine:", e.message);
+    console.log(`\nChaîne valide : ${myBlockchain.isChainValid()}`);
+}
+
+function handleShowUTXOs() {
+    if (!currentWallet) {
+        console.log("Aucun wallet sélectionné.");
+        return;
     }
+    const address = currentWallet.getAddress();
+    const utxos = myBlockchain.getUTXOsForAddress(address);
+    console.log(`\nUTXOs pour ${address.substring(0, 15)}... :`);
+    utxos.forEach((utxo, i) => {
+        console.log(`  ${i}: txid=${utxo.txid.substring(0, 10)}... idx=${utxo.outputIndex} montant=${utxo.amount}`);
+    });
+    console.log(`Total : ${utxos.reduce((sum, u) => sum + u.amount, 0)}`);
 }
 
 async function handleConnectPeer() {
     const input = (await ask("Adresse du pair (ex: ws://localhost:8889 ou juste le port) : ")).trim();
-
     let address;
     if (/^\d+$/.test(input)) {
         address = `ws://localhost:${input}`;
     } else if (input.startsWith("ws://") || input.startsWith("wss://")) {
         address = input;
     } else {
-        console.error(`Adresse invalide : '${input}'`);
-        console.error(`  → Utilise ws://host:port  ou  juste un numero de port`);
+        console.error("Adresse invalide. Utilisez ws://host:port ou un numéro de port.");
         return;
     }
-
     p2p.connectToPeer(address);
-    // La synchronisation de chaîne se fait automatiquement via QUERY_ALL dans connectToPeer
 }
 
-// ─── Main loop ────────────────────────────────────────────────────────────────
-
+// ─── Boucle principale ────────────────────────────────────────────────────────
 async function mainLoop() {
     while (true) {
         printMenu();
         const choice = (await ask("Choix : ")).trim();
-
         switch (choice) {
             case "1": await handleCreateWallet(); break;
             case "2": await handleChooseWallet(); break;
@@ -264,8 +245,9 @@ async function mainLoop() {
             case "4": await handleSendCoins();    break;
             case "5":       handleMineBlock();    break;
             case "6":       handleShowChain();    break;
-            case "7": await handleConnectPeer();  break;
-            case "8":
+            case "7":       handleShowUTXOs();    break;
+            case "8": await handleConnectPeer();  break;
+            case "9":
                 console.log("Au revoir !");
                 rl.close();
                 process.exit(0);
@@ -275,4 +257,4 @@ async function mainLoop() {
     }
 }
 
-mainLoop();
+mainLoop().catch(err => console.error("Erreur fatale :", err));

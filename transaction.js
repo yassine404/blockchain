@@ -1,47 +1,75 @@
 const SHA256 = require("crypto-js/sha256");
 const EC = require("elliptic").ec;
 const ec = new EC("secp256k1");
+const { publicKeyToAddress } = require("./utils");
 
 
 class Transaction {
-    constructor(fromAddress, toAddress, amount){
-        this.fromAddress= fromAddress;
-        this.toAddress= toAddress;
-        this.amount=amount;
+    constructor(){
+        this.inputs=[];// array of txid , outpoutindex , signature , pubkey
+        this.outputs =[]; // aray of  address, amount
         this.timestamp   = Date.now();
-        this.signature = null;
     }
+
+    addInput(txid, outputIndex, pubkey= null){
+        this.inputs.push({txid, outputIndex, signature: null,pubkey});
+    }
+
+    addOutput(address ,amount){
+        this.outputs.push({address, amount})
+    }
+
 
     calculateHash() {
-        return SHA256(
-            this.fromAddress + this.toAddress + this.amount +this.timestamp
-        ).toString();
+        const data ={
+            inputs: this.inputs.map(i => ({
+                txid: i.txid, 
+                outputIndex: i.outputIndex,
+                pubkey: i.pubkey
+            })),outputs:this.outputs ,
+            timestamp: this.timestamp 
+        };
+        return SHA256(JSON.stringify(data)).toString();
     }
 
-    signTransaction(signingKey) {
-
-        if (signingKey.getPublic("hex") !== this.fromAddress) {
-            throw new Error("You cannot sign transactions for other wallets!");
+    signInput(index, privateKey) {
+        const key = ec.keyFromPrivate(privateKey,"hex");
+        const pubkey = key.getPublic("hex");
+        if(this.inputs[index].pubkey && this.inputs[index].pubkey !== pubkey){
+            throw new Error("Private key does not match public key in input ")
         }
-
-        const hashTx = this.calculateHash();
-        const sig = signingKey.sign(hashTx, "base64");
-
-        this.signature = sig.toDER("hex");
+        this.inputs[index].pubkey = pubkey;
+        const hash = this.calculateHash();
+        const sig = key.sign(hash,"base64");
+        this.inputs[index].signature =sig.toDER("hex");
     }
-    
-    isValid() {
+        
+    isValid(utxoSet) {
+        if (!this.inputs.length || !this.outputs.length) return false;
 
-        // mining reward transaction
-        if (this.fromAddress === null) return true;
+        let inputSum = 0 ;
+        for(let i=0; i < this.inputs.length; i++){
+            const inp =this.inputs[i];
+            if(!inp.signature)return false;
+            
+            const utxo = utxoSet[inp.txid]?.[inp.outputIndex];
+            if(!utxo)return false;
+            if(utxo.spent) return false;
 
-        if (!this.signature || this.signature.length === 0) {
-            throw new Error("No signature in this transaction");
+            const pubkeyObj = ec.keyFromPublic(inp.pubkey,"hex");
+            if(!pubkeyObj.verify(this.calculateHash(), inp.signature)){
+                return false;
+            }
+            // Inside isValid, after verifying signature:
+            const expectedAddress = utxo.address;
+            const actualAddress = publicKeyToAddress(inp.pubkey);
+            if (expectedAddress !== actualAddress) return false;
+
+            inputSum += utxo.amount;
         }
-
-        const publicKey = ec.keyFromPublic(this.fromAddress, "hex");
-
-        return publicKey.verify(this.calculateHash(), this.signature);
+        const outputSum =this.outputs.reduce((sum, out) => sum + out.amount, 0);
+        if (inputSum < outputSum) return false;
+        return true;
     }
 }
 

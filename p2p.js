@@ -4,9 +4,10 @@ const Transaction = require("./transaction");
 
 // Types de messages échangés entre nœuds
 const MSG = {
-    QUERY_ALL:   "QUERY_ALL",    // "envoie-moi toute ta chaîne"
-    RESPONSE_ALL: "RESPONSE_ALL", // "voici toute ma chaîne"
-    NEW_BLOCK:   "NEW_BLOCK",    // "j'ai miné un nouveau bloc"
+    QUERY_ALL:       "QUERY_ALL",
+    RESPONSE_ALL:    "RESPONSE_ALL",
+    NEW_BLOCK:       "NEW_BLOCK",
+    NEW_TRANSACTION: "NEW_TRANSACTION"   // Optionnel – pour partager le mempool
 };
 
 class P2P {
@@ -21,14 +22,25 @@ class P2P {
     // ─── Serveur ────────────────────────────────────────────────────────────────
     listen(port) {
         const server = new WebSocket.Server({ port });
-        this.port    = port;
 
-        server.on("connection", socket => {
-            console.log(`Nouveau pair connecte sur port ${port}`);
-            this.initConnection(socket);
+        server.on("error", err => {
+            if (err.code === "EADDRINUSE") {
+                console.warn(`Port ${port} occupé, essai sur ${port + 1}...`);
+                server.close();
+                this.listen(port + 1);
+            } else {
+                console.error("Erreur P2P serveur:", err.message);
+            }
         });
 
-        console.log(`Serveur P2P sur port ${port}`);
+        server.on("listening", () => {
+            console.log(`Serveur P2P sur port ${port}`);
+            this.port = port;
+            server.on("connection", socket => {
+                console.log(`Nouveau pair connecté sur port ${port}`);
+                this.initConnection(socket);
+            });
+        });
     }
 
     // ─── Client ─────────────────────────────────────────────────────────────────
@@ -36,7 +48,7 @@ class P2P {
         const socket = new WebSocket(peerAddress);
 
         socket.on("open", () => {
-            console.log(`Connecte au pair : ${peerAddress}`);
+            console.log(`Connecté au pair : ${peerAddress}`);
             this.initConnection(socket);
             // Dès la connexion, demander toute la chaîne du pair
             this.send(socket, { type: MSG.QUERY_ALL });
@@ -62,7 +74,7 @@ class P2P {
 
         socket.on("close", () => {
             this.sockets = this.sockets.filter(s => s !== socket);
-            console.log("Pair deconnecte.");
+            console.log("Pair déconnecté.");
         });
 
         socket.on("error", err => {
@@ -74,7 +86,6 @@ class P2P {
     handleMessage(socket, msg) {
         switch (msg.type) {
 
-            // Un pair demande toute notre chaîne → on lui envoie
             case MSG.QUERY_ALL:
                 this.send(socket, {
                     type:  MSG.RESPONSE_ALL,
@@ -82,14 +93,17 @@ class P2P {
                 });
                 break;
 
-            // Un pair nous envoie toute sa chaîne → on compare et on adopte si plus longue
             case MSG.RESPONSE_ALL:
                 this.handleChainResponse(msg.chain);
                 break;
 
-            // Un pair a miné un nouveau bloc → on vérifie et on ajoute
             case MSG.NEW_BLOCK:
                 this.handleNewBlock(msg.block);
+                break;
+
+            // Optionnel – réception d'une transaction diffusée
+            case MSG.NEW_TRANSACTION:
+                this.handleNewTransaction(msg.transaction);
                 break;
 
             default:
@@ -103,9 +117,11 @@ class P2P {
         const receivedChain = rawChain.map(b => {
             const block = Object.assign(new Block(0, 0, [], ""), b);
             if (Array.isArray(block.transactions)) {
-                block.transactions = block.transactions.map(t =>
-                    Object.assign(new Transaction(null, null, 0), t)
-                );
+                block.transactions = block.transactions.map(t => {
+                    const tx = new Transaction();
+                    Object.assign(tx, t);
+                    return tx;
+                });
             }
             return block;
         });
@@ -114,22 +130,21 @@ class P2P {
         const receivedLength = receivedChain.length;
 
         if (receivedLength <= ourLength) {
-            // Notre chaîne est aussi longue ou plus longue → on garde la nôtre
-            console.log(`Chaine recue (${receivedLength} blocs) <= notre chaine (${ourLength} blocs) — ignoree`);
+            console.log(`Chaîne reçue (${receivedLength} blocs) <= notre chaîne (${ourLength} blocs) — ignorée`);
             return;
         }
 
-        // La chaîne reçue est plus longue → on vérifie qu'elle est valide
         if (!this.isValidChain(receivedChain)) {
-            console.warn("Chaine recue invalide — ignoree");
+            console.warn("Chaîne reçue invalide — ignorée");
             return;
         }
 
-        // On adopte la chaîne plus longue
-        console.log(`Chaine plus longue adoptee : ${receivedLength} blocs (on avait ${ourLength})`);
+        console.log(`Chaîne plus longue adoptée : ${receivedLength} blocs (on avait ${ourLength})`);
         this.blockchain.chain = receivedChain;
 
-        // Sauvegarder la nouvelle chaîne sur disque
+        // ⚡ RECONSTRUIRE L'UTXO SET À PARTIR DE LA NOUVELLE CHAÎNE
+        this.blockchain._buildUTXOset();
+
         if (this.onChainUpdate) this.onChainUpdate();
     }
 
@@ -138,39 +153,57 @@ class P2P {
         // Re-hydrater le bloc
         const block = Object.assign(new Block(0, 0, [], ""), rawBlock);
         if (Array.isArray(block.transactions)) {
-            block.transactions = block.transactions.map(t =>
-                Object.assign(new Transaction(null, null, 0), t)
-            );
+            block.transactions = block.transactions.map(t => {
+                const tx = new Transaction();
+                Object.assign(tx, t);
+                return tx;
+            });
         }
 
         const latest = this.blockchain.getLatestBlock();
 
-        // Vérifications d'intégrité
         if (block.index !== latest.index + 1) {
-            console.warn(`Bloc #${block.index} inattendu (on attend #${latest.index + 1}) — on demande la chaine complete`);
-            // On est peut-être en retard de plusieurs blocs → demander toute la chaîne
+            console.warn(`Bloc #${block.index} inattendu (on attend #${latest.index + 1}) — on demande la chaîne complète`);
             this.broadcastAll({ type: MSG.QUERY_ALL });
             return;
         }
 
         if (block.previousHash !== latest.hash) {
-            console.warn(`Bloc #${block.index} : previousHash incorrect — ignore`);
+            console.warn(`Bloc #${block.index} : previousHash incorrect — ignoré`);
             return;
         }
 
-        // Vérifier le hash du bloc lui-même
         const tempBlock = Object.assign(new Block(0, 0, [], ""), block);
         if (tempBlock.calculateHash() !== block.hash) {
-            console.warn(`Bloc #${block.index} : hash invalide — ignore`);
+            console.warn(`Bloc #${block.index} : hash invalide — ignoré`);
             return;
         }
 
-        // Tout est bon : on ajoute le bloc
-        this.blockchain.chain.push(block);
-        console.log(`Bloc #${block.index} recu et ajoute depuis un pair`);
+        // ⚡ APPLIQUER LES TRANSACTIONS À L'UTXO SET AVANT D'AJOUTER LE BLOC
+        block.transactions.forEach(tx => this.blockchain._applyTransactionToUTXOSet(tx));
 
-        // Sauvegarder
+        this.blockchain.chain.push(block);
+        console.log(`Bloc #${block.index} reçu et ajouté depuis un pair`);
+
         if (this.onChainUpdate) this.onChainUpdate();
+    }
+
+    // ─── Réception d'une transaction diffusée (optionnel) ───────────────────────
+    handleNewTransaction(rawTx) {
+        const tx = new Transaction();
+        Object.assign(tx, rawTx);
+        if (tx.isValid(this.blockchain.utxoSet)) {
+            // Éviter les doublons
+            const exists = this.blockchain.pendingTransactions.some(
+                t => t.calculateHash() === tx.calculateHash()
+            );
+            if (!exists) {
+                this.blockchain.pendingTransactions.push(tx);
+                console.log("Nouvelle transaction reçue et ajoutée au mempool");
+            }
+        } else {
+            console.warn("Transaction reçue invalide — ignorée");
+        }
     }
 
     // ─── Diffuser un nouveau bloc miné à tous les pairs ─────────────────────────
@@ -183,7 +216,12 @@ class P2P {
                 count++;
             }
         });
-        if (count > 0) console.log(`Bloc #${block.index} diffuse a ${count} pair(s)`);
+        if (count > 0) console.log(`Bloc #${block.index} diffusé à ${count} pair(s)`);
+    }
+
+    // ─── Diffuser une transaction à tous les pairs (optionnel) ──────────────────
+    broadcastTransaction(tx) {
+        this.broadcastAll({ type: MSG.NEW_TRANSACTION, transaction: tx });
     }
 
     // ─── Diffuser un message quelconque à tous les pairs ────────────────────────
@@ -207,16 +245,14 @@ class P2P {
             const current  = chain[i];
             const previous = chain[i - 1];
 
-            // Vérifier le hash du bloc
             const temp = Object.assign(new Block(0, 0, [], ""), current);
             if (temp.calculateHash() !== current.hash) {
                 console.error(`Bloc #${i} hash invalide`);
                 return false;
             }
 
-            // Vérifier le lien avec le bloc précédent
             if (current.previousHash !== previous.hash) {
-                console.error(`Bloc #${i} non lie au bloc #${i - 1}`);
+                console.error(`Bloc #${i} non lié au bloc #${i - 1}`);
                 return false;
             }
         }
